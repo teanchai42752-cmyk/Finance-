@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import os
 
 # =====================================================
 # 1. PAGE CONFIGURATION
@@ -394,164 +395,195 @@ def render_trading_signals():
 
     st.title("📈 Trading Signals")
     st.write("วิเคราะห์แนวโน้มราคาและสัญญาณทางเทคนิคสำหรับหุ้นและสินทรัพย์หลัก")
-    st.caption("ข้อมูลราคาอ้างอิงจาก Yahoo Finance ผ่าน yfinance อาจล่าช้าและไม่ใช่ราคาสำหรับส่งคำสั่งซื้อขายจริง")
+    source = st.selectbox("แหล่งข้อมูลราคา", ["Yahoo Finance", "MetaTrader 5 Bridge"])
 
-    symbol_map = {
-        "AAPL": "AAPL",
-        "TSLA": "TSLA",
-        "XAU/USD": "XAUUSD=X",
-        "EUR/USD": "EURUSD=X"
-    }
+    if source == "MetaTrader 5 Bridge":
+        st.caption("ข้อมูลจาก MT5 Terminal ที่ล็อกอินกับโบรกเกอร์ของคุณ ผ่าน HTTPS API")
+        api_url = st.secrets.get("MT5_API_URL", os.getenv("MT5_API_URL", "")).strip().rstrip("/")
+        api_token = st.secrets.get("MT5_API_TOKEN", os.getenv("MT5_API_TOKEN", "")).strip()
+        c1, c2 = st.columns(2)
+        with c1:
+            mt5_symbol = st.text_input("ชื่อ Symbol ใน MT5", value="XAUUSD", help="ชื่ออาจต่างกันตามโบรกเกอร์ เช่น XAUUSD.a หรือ GOLD")
+        with c2:
+            mt5_timeframe = st.selectbox("MT5 Timeframe", ["M1", "M5", "M15", "M30", "H1", "H4"], index=1)
 
-    c1, c2, c3 = st.columns([1.2, 1, 1])
-    with c1:
-        asset = st.selectbox("เลือกสินทรัพย์", list(symbol_map.keys()), key="signals_asset")
-    with c2:
-        period = st.selectbox("ช่วงข้อมูล", ["3mo", "6mo", "1y", "2y"], index=2, key="signals_period")
-    with c3:
-        interval = st.selectbox("Timeframe", ["1d", "1h", "30m"], index=0, key="signals_interval")
-
-    if interval == "30m" and period != "1mo":
-        period = "1mo"
-        st.info("ปรับช่วงข้อมูลเป็น 1mo เนื่องจากข้อมูล 30 นาทีมีข้อจำกัดด้านระยะเวลาย้อนหลัง")
-    elif interval == "1h" and period == "2y":
-        period = "6mo"
-        st.info("ปรับช่วงข้อมูลเป็น 6mo เนื่องจากข้อมูลรายชั่วโมงมีข้อจำกัดด้านระยะเวลาย้อนหลัง")
-
-    if st.button("🔄 โหลดข้อมูลล่าสุด", type="primary", key="refresh_signals"):
-        st.cache_data.clear()
-
-    @st.cache_data(ttl=60, show_spinner=False)
-    def load_market_data(ticker, selected_period, selected_interval):
-        import yfinance as yf
-        data = yf.download(
-            ticker,
-            period=selected_period,
-            interval=selected_interval,
-            auto_adjust=True,
-            progress=False,
-            threads=False
-        )
-        if data is None or data.empty:
-            return pd.DataFrame()
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        data = data.rename(columns=str.title)
-        return data
-
-    try:
-        with st.spinner(f"กำลังดึงข้อมูล {asset}..."):
-            market = load_market_data(symbol_map[asset], period, interval)
-
-        if market.empty or "Close" not in market.columns:
-            st.error("ไม่พบข้อมูลราคา กรุณาลองเปลี่ยนช่วงเวลาหรือกลับมาตรวจสอบอีกครั้ง")
+        if not api_url or not api_token:
+            st.warning("กรุณาตั้งค่า MT5_API_URL และ MT5_API_TOKEN ใน Streamlit Community Cloud → App settings → Secrets")
+            st.code('MT5_API_URL = "https://your-domain.example"\nMT5_API_TOKEN = "your-long-random-secret"', language="toml")
+            st.info("เมื่อกำหนด Secrets และเปิด MT5 EA บน VPS แล้ว จึงจะดึงข้อมูลจริงได้")
             return
 
-        market = market.copy()
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            if col in market.columns:
-                market[col] = pd.to_numeric(market[col], errors="coerce")
-        market = market.dropna(subset=["Close"])
-        if len(market) < 20:
-            st.warning("ข้อมูลมีน้อยเกินไปสำหรับการคำนวณตัวชี้วัด กรุณาเลือกช่วงเวลาที่ยาวขึ้น")
+        if st.button("🔄 โหลดข้อมูล MT5 ล่าสุด", type="primary", key="refresh_mt5_signals"):
+            st.cache_data.clear()
+
+        @st.cache_data(ttl=5, show_spinner=False)
+        def load_mt5_market_data(base_url, token, symbol, timeframe):
+            import requests
+            response = requests.get(
+                f"{base_url}/api/v1/market-data",
+                params={"symbol": symbol, "timeframe": timeframe, "limit": 500},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10
+            )
+            response.raise_for_status()
+            payload = response.json()
+            bars = payload.get("bars", [])
+            if not bars:
+                return pd.DataFrame(), payload
+            data = pd.DataFrame(bars)
+            data["time"] = pd.to_datetime(data["time"], unit="s", utc=True)
+            data = data.set_index("time").sort_index()
+            return data.rename(columns={
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "tick_volume": "Volume"
+            }), payload
+
+        try:
+            with st.spinner("กำลังรับข้อมูลจาก MT5 Bridge..."):
+                market, mt5_payload = load_mt5_market_data(api_url, api_token, mt5_symbol.strip(), mt5_timeframe)
+            if market.empty:
+                st.error("ยังไม่มีข้อมูลใน MT5 Bridge กรุณาตรวจสอบว่า MT5 เปิดอยู่และ EA ทำงานแล้ว")
+                return
+            received_at = pd.to_datetime(mt5_payload.get("received_at"), utc=True, errors="coerce")
+            if pd.isna(received_at):
+                st.error("API ไม่ส่งเวลารับข้อมูล จึงไม่สามารถยืนยันความสดใหม่ของราคาได้")
+                return
+            age_seconds = (pd.Timestamp.now(tz="UTC") - received_at).total_seconds()
+            if age_seconds > 120 or age_seconds < -30:
+                st.error(f"ข้อมูล MT5 ไม่สดใหม่ (รับล่าสุด {age_seconds:.0f} วินาทีที่แล้ว) ระบบหยุดคำนวณสัญญาณเพื่อป้องกันการใช้ราคาค้าง")
+                return
+            bid, ask = float(mt5_payload.get("bid", 0) or 0), float(mt5_payload.get("ask", 0) or 0)
+            if bid > 0:
+                last_idx = market.index[-1]
+                market.loc[last_idx, "Close"] = bid
+                market.loc[last_idx, "High"] = max(float(market.loc[last_idx, "High"]), bid)
+                market.loc[last_idx, "Low"] = min(float(market.loc[last_idx, "Low"]), bid)
+            data_source_label = f"MetaTrader 5 | {mt5_symbol} | {mt5_timeframe}"
+            if bid > 0 and ask > 0:
+                st.caption(f"Bid: {bid:.3f} | Ask: {ask:.3f} | Spread: {ask-bid:.3f} | Last update: {received_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        except Exception as e:
+            st.error(f"เชื่อมต่อ MT5 Bridge ไม่สำเร็จ: {e}")
+            st.info("ตรวจสอบ URL, API Token, HTTPS, firewall และสถานะ MT5 EA")
             return
 
-        close = market["Close"]
-        market["SMA 5"] = close.rolling(5).mean()
-        market["SMA 15"] = close.rolling(15).mean()
-        market["EMA 12"] = close.ewm(span=12, adjust=False).mean()
-        market["EMA 26"] = close.ewm(span=26, adjust=False).mean()
-        market["MACD"] = market["EMA 12"] - market["EMA 26"]
-        market["MACD Signal"] = market["MACD"].ewm(span=9, adjust=False).mean()
+    else:
+        st.caption("ข้อมูลราคาอ้างอิงจาก Yahoo Finance ผ่าน yfinance อาจล่าช้าและไม่ใช่ราคาสำหรับส่งคำสั่งซื้อขายจริง")
+        symbol_map = {"AAPL": "AAPL", "TSLA": "TSLA", "XAU/USD": "XAUUSD=X", "EUR/USD": "EURUSD=X"}
+        c1, c2, c3 = st.columns([1.2, 1, 1])
+        with c1:
+            asset = st.selectbox("เลือกสินทรัพย์", list(symbol_map.keys()), key="signals_asset")
+        with c2:
+            period = st.selectbox("ช่วงข้อมูล", ["3mo", "6mo", "1y", "2y"], index=2, key="signals_period")
+        with c3:
+            interval = st.selectbox("Timeframe", ["1d", "1h", "30m"], index=0, key="signals_interval")
+        if interval == "30m" and period != "1mo":
+            period = "1mo"
+            st.info("ปรับช่วงข้อมูลเป็น 1mo เนื่องจากข้อมูล 30 นาทีมีข้อจำกัดด้านระยะเวลาย้อนหลัง")
+        elif interval == "1h" and period == "2y":
+            period = "6mo"
+            st.info("ปรับช่วงข้อมูลเป็น 6mo เนื่องจากข้อมูลรายชั่วโมงมีข้อจำกัดด้านระยะเวลาย้อนหลัง")
+        if st.button("🔄 โหลดข้อมูลล่าสุด", type="primary", key="refresh_signals"):
+            st.cache_data.clear()
 
-        delta = close.diff()
-        gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-        loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
-        rs = gain / loss.replace(0, np.nan)
-        market["RSI 14"] = 100 - (100 / (1 + rs))
-        market["RSI 14"] = market["RSI 14"].fillna(50)
+        @st.cache_data(ttl=60, show_spinner=False)
+        def load_yahoo_market_data(ticker, selected_period, selected_interval):
+            import yfinance as yf
+            data = yf.download(ticker, period=selected_period, interval=selected_interval, auto_adjust=True, progress=False, threads=False)
+            if data is None or data.empty:
+                return pd.DataFrame()
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            return data.rename(columns=str.title)
+        try:
+            with st.spinner(f"กำลังดึงข้อมูล {asset}..."):
+                market = load_yahoo_market_data(symbol_map[asset], period, interval)
+            data_source_label = f"Yahoo Finance | {symbol_map[asset]}"
+        except Exception as e:
+            st.error(f"ไม่สามารถดึงข้อมูล Yahoo Finance ได้: {e}")
+            return
 
-        market["TR"] = pd.concat([
-            market["High"] - market["Low"],
-            (market["High"] - close.shift()).abs(),
-            (market["Low"] - close.shift()).abs()
-        ], axis=1).max(axis=1) if {"High", "Low"}.issubset(market.columns) else close.diff().abs()
-        market["ATR 14"] = market["TR"].rolling(14).mean()
+    if market.empty or "Close" not in market.columns:
+        st.error("ไม่พบข้อมูลราคา กรุณาตรวจสอบแหล่งข้อมูลและลองอีกครั้ง")
+        return
+    market = market.copy()
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in market.columns:
+            market[col] = pd.to_numeric(market[col], errors="coerce")
+    market = market.dropna(subset=["Close"])
+    if len(market) < 30:
+        st.warning("ข้อมูลมีน้อยเกินไปสำหรับการคำนวณตัวชี้วัด กรุณาเพิ่มจำนวนแท่งราคา")
+        return
 
-        latest = market.iloc[-1]
-        previous = market.iloc[-2]
-        price = float(latest["Close"])
-        prior_price = float(previous["Close"])
-        change = price - prior_price
-        change_pct = (change / prior_price * 100) if prior_price else 0.0
-        sma_fast = float(latest["SMA 5"])
-        sma_slow = float(latest["SMA 15"])
-        rsi = float(latest["RSI 14"])
-        macd = float(latest["MACD"])
-        macd_signal = float(latest["MACD Signal"])
+    close = market["Close"]
+    market["SMA 5"] = close.rolling(5).mean()
+    market["SMA 15"] = close.rolling(15).mean()
+    market["EMA 12"] = close.ewm(span=12, adjust=False).mean()
+    market["EMA 26"] = close.ewm(span=26, adjust=False).mean()
+    market["MACD"] = market["EMA 12"] - market["EMA 26"]
+    market["MACD Signal"] = market["MACD"].ewm(span=9, adjust=False).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    market["RSI 14"] = (100 - (100 / (1 + rs))).fillna(50)
+    market["TR"] = pd.concat([
+        market["High"] - market["Low"],
+        (market["High"] - close.shift()).abs(),
+        (market["Low"] - close.shift()).abs()
+    ], axis=1).max(axis=1) if {"High", "Low"}.issubset(market.columns) else close.diff().abs()
+    market["ATR 14"] = market["TR"].rolling(14).mean()
 
-        if sma_fast > sma_slow and macd > macd_signal and rsi < 70:
-            signal = "BUY"
-            rationale = "SMA 5 อยู่เหนือ SMA 15 และ MACD เป็นบวกเมื่อเทียบกับเส้น Signal โดย RSI ยังไม่เข้าสู่เขตซื้อมากเกินไป"
-        elif sma_fast < sma_slow and macd < macd_signal and rsi > 30:
-            signal = "SELL"
-            rationale = "SMA 5 อยู่ต่ำกว่า SMA 15 และ MACD ต่ำกว่าเส้น Signal โดย RSI ยังไม่เข้าสู่เขตขายมากเกินไป"
-        else:
-            signal = "HOLD"
-            rationale = "สัญญาณจากแนวโน้มและโมเมนตัมยังไม่สอดคล้องกันเพียงพอ"
+    latest, previous = market.iloc[-1], market.iloc[-2]
+    price, prior_price = float(latest["Close"]), float(previous["Close"])
+    change = price - prior_price
+    change_pct = (change / prior_price * 100) if prior_price else 0.0
+    sma_fast, sma_slow = float(latest["SMA 5"]), float(latest["SMA 15"])
+    rsi, macd, macd_signal = float(latest["RSI 14"]), float(latest["MACD"]), float(latest["MACD Signal"])
+    if sma_fast > sma_slow and macd > macd_signal and rsi < 70:
+        signal, rationale = "BUY", "SMA 5 อยู่เหนือ SMA 15 และ MACD สูงกว่าเส้น Signal โดย RSI ยังไม่เข้าสู่เขตซื้อมากเกินไป"
+    elif sma_fast < sma_slow and macd < macd_signal and rsi > 30:
+        signal, rationale = "SELL", "SMA 5 อยู่ต่ำกว่า SMA 15 และ MACD ต่ำกว่าเส้น Signal โดย RSI ยังไม่เข้าสู่เขตขายมากเกินไป"
+    else:
+        signal, rationale = "HOLD", "สัญญาณจากแนวโน้มและโมเมนตัมยังไม่สอดคล้องกันเพียงพอ"
+    atr = float(latest["ATR 14"]) if pd.notna(latest["ATR 14"]) else price * 0.01
+    if signal == "BUY":
+        stop_loss, take_profit = price - 1.5 * atr, price + 3.0 * atr
+    elif signal == "SELL":
+        stop_loss, take_profit = price + 1.5 * atr, price - 3.0 * atr
+    else:
+        stop_loss, take_profit = np.nan, np.nan
 
-        atr = float(latest["ATR 14"]) if pd.notna(latest["ATR 14"]) else price * 0.01
-        if signal == "BUY":
-            stop_loss = price - 1.5 * atr
-            take_profit = price + 3.0 * atr
-        elif signal == "SELL":
-            stop_loss = price + 1.5 * atr
-            take_profit = price - 3.0 * atr
-        else:
-            stop_loss = np.nan
-            take_profit = np.nan
-
-        st.divider()
-        st.subheader(f"Market Overview — {asset}")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Last Price", f"{price:,.5f}" if "FX" in symbol_map[asset] else f"{price:,.2f}")
-        m2.metric("Change", f"{change:+,.5f}", f"{change_pct:+.2f}%")
-        m3.metric("Trading Signal", signal)
-        m4.metric("RSI (14)", f"{rsi:.2f}")
-
-        signal_color = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}[signal]
-        st.markdown(f"### {signal_color} {signal}")
-        st.write(rationale)
-
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Entry Reference", f"{price:,.5f}")
-        s2.metric("Stop Loss", f"{stop_loss:,.5f}" if pd.notna(stop_loss) else "รอสัญญาณ")
-        s3.metric("Take Profit (RR 1:2)", f"{take_profit:,.5f}" if pd.notna(take_profit) else "รอสัญญาณ")
-
-        st.caption("ระดับ Stop Loss / Take Profit เป็นตัวอย่างจาก ATR 1.5 เท่า และ Risk:Reward 1:2 ไม่ใช่คำแนะนำลงทุนหรือคำสั่งซื้อขาย")
-        st.divider()
-        st.subheader("Price & Moving Averages")
-        chart_columns = ["Close", "SMA 5", "SMA 15"]
-        st.line_chart(market[chart_columns].tail(150), use_container_width=True)
-
-        left, right = st.columns(2)
-        with left:
-            st.subheader("MACD")
-            st.line_chart(market[["MACD", "MACD Signal"]].tail(150), use_container_width=True)
-        with right:
-            st.subheader("RSI (14)")
-            st.line_chart(market[["RSI 14"]].tail(150), use_container_width=True)
-
-        st.subheader("Technical Indicators")
-        indicator_view = market[["Close", "SMA 5", "SMA 15", "RSI 14", "MACD", "MACD Signal", "ATR 14"]].tail(10).sort_index(ascending=False)
-        st.dataframe(indicator_view.style.format("{:,.4f}"), use_container_width=True)
-
-        csv_data = market.reset_index().to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 Download Market Data & Indicators", csv_data, f"{asset.replace('/', '_')}_signals.csv", "text/csv")
-        st.caption(f"แหล่งข้อมูล: Yahoo Finance | Ticker: {symbol_map[asset]} | อัปเดตตามข้อมูลล่าสุดที่ผู้ให้บริการเปิดเผย")
-    except Exception as e:
-        st.error(f"ไม่สามารถประมวลผล Trading Signals ได้: {e}")
-        st.info("ตรวจสอบการเชื่อมต่ออินเทอร์เน็ตและลองโหลดข้อมูลใหม่")
+    st.divider()
+    st.subheader("Market Overview")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Last Price", f"{price:,.3f}" if source == "MetaTrader 5 Bridge" else f"{price:,.5f}")
+    m2.metric("Change", f"{change:+,.3f}" if source == "MetaTrader 5 Bridge" else f"{change:+,.5f}", f"{change_pct:+.2f}%")
+    m3.metric("Trading Signal", signal)
+    m4.metric("RSI (14)", f"{rsi:.2f}")
+    signal_color = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}[signal]
+    st.markdown(f"### {signal_color} {signal}")
+    st.write(rationale)
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Entry Reference", f"{price:,.3f}")
+    s2.metric("Stop Loss", f"{stop_loss:,.3f}" if pd.notna(stop_loss) else "รอสัญญาณ")
+    s3.metric("Take Profit (RR 1:2)", f"{take_profit:,.3f}" if pd.notna(take_profit) else "รอสัญญาณ")
+    st.caption("ระดับ Stop Loss / Take Profit เป็นตัวอย่างจาก ATR 1.5 เท่า และ Risk:Reward 1:2 ไม่ใช่คำแนะนำลงทุนหรือคำสั่งซื้อขาย")
+    st.divider()
+    st.subheader("Price & Moving Averages")
+    st.line_chart(market[["Close", "SMA 5", "SMA 15"]].tail(150), use_container_width=True)
+    left, right = st.columns(2)
+    with left:
+        st.subheader("MACD")
+        st.line_chart(market[["MACD", "MACD Signal"]].tail(150), use_container_width=True)
+    with right:
+        st.subheader("RSI (14)")
+        st.line_chart(market[["RSI 14"]].tail(150), use_container_width=True)
+    st.subheader("Technical Indicators")
+    indicator_view = market[["Close", "SMA 5", "SMA 15", "RSI 14", "MACD", "MACD Signal", "ATR 14"]].tail(10).sort_index(ascending=False)
+    st.dataframe(indicator_view.style.format("{:,.4f}"), use_container_width=True)
+    csv_data = market.reset_index().to_csv(index=False).encode("utf-8-sig")
+    st.download_button("📥 Download Market Data & Indicators", csv_data, "trading_signals_market_data.csv", "text/csv")
+    st.caption(f"แหล่งข้อมูล: {data_source_label} | สัญญาณเป็นการวิเคราะห์เชิงเทคนิค ไม่ได้ส่งคำสั่งซื้อขาย")
 
 
 # =====================================================
