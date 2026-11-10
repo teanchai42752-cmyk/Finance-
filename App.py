@@ -1270,8 +1270,8 @@ def render_dcf_valuation():
 def render_feasibility_study():
 
     st.title("📊 Feasibility Study")
-    st.write("ประเมินความเป็นไปได้ทางการเงินของโครงการลงทุนด้วยประมาณการกระแสเงินสดและตัวชี้วัดความคุ้มค่า")
-    st.caption("ผลลัพธ์เป็นแบบจำลองจากสมมติฐานที่ผู้ใช้ป้อน ควรตรวจสอบความสมเหตุสมผลของข้อมูลก่อนตัดสินใจลงทุน")
+    st.write("ประเมินความเป็นไปได้ทางการเงินของโครงการลงทุนด้วยประมาณการกระแสเงินสด ภาษี ค่าเสื่อมราคา และตัวชี้วัดความคุ้มค่า")
+    st.caption("ผลลัพธ์เป็นแบบจำลองจากสมมติฐานที่ผู้ใช้ป้อน ไม่ใช่คำแนะนำการลงทุน")
     st.divider()
 
     st.subheader("1. Project Assumptions")
@@ -1279,7 +1279,7 @@ def render_feasibility_study():
         c1, c2, c3 = st.columns(3)
         with c1:
             project_name = st.text_input("ชื่อโครงการ", value="New Investment Project")
-            initial_investment = st.number_input("เงินลงทุนเริ่มต้น (บาท)", min_value=0.0, value=5_000_000.0, step=100_000.0)
+            initial_investment = st.number_input("เงินลงทุนสินทรัพย์เริ่มต้น (บาท)", min_value=0.0, value=5_000_000.0, step=100_000.0)
             project_years = st.number_input("ระยะเวลาโครงการ (ปี)", min_value=1, max_value=20, value=5, step=1)
         with c2:
             annual_revenue = st.number_input("รายได้ปีแรก (บาท)", min_value=0.0, value=2_500_000.0, step=100_000.0)
@@ -1291,12 +1291,16 @@ def render_feasibility_study():
             discount_rate = st.number_input("อัตราคิดลด / Required Return (%)", min_value=0.1, max_value=100.0, value=10.0, step=0.5)
         c4, c5, c6 = st.columns(3)
         with c4:
-            tax_rate = st.number_input("อัตราภาษี (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0)
+            tax_rate = st.number_input("อัตราภาษีเงินได้นิติบุคคล (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0)
         with c5:
             annual_capex = st.number_input("เงินลงทุนเพิ่มเติมต่อปี (บาท)", min_value=0.0, value=0.0, step=50_000.0)
         with c6:
             salvage_value = st.number_input("มูลค่าซากเมื่อสิ้นสุดโครงการ (บาท)", min_value=0.0, value=0.0, step=50_000.0)
-        working_capital_pct = st.number_input("เงินทุนหมุนเวียนเริ่มต้น (% ของรายได้ปีแรก)", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+        c7, c8 = st.columns(2)
+        with c7:
+            working_capital_pct = st.number_input("เงินทุนหมุนเวียน (% ของรายได้)", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+        with c8:
+            depreciation_method = st.selectbox("วิธีคิดค่าเสื่อมราคา", ["Straight-line (เส้นตรง)", "ไม่คิดค่าเสื่อมราคา"])
         submitted = st.form_submit_button("🚀 ประเมินความคุ้มค่าของโครงการ", type="primary", use_container_width=True)
 
     if not submitted:
@@ -1309,7 +1313,8 @@ def render_feasibility_study():
         tax = tax_rate / 100
         discount = discount_rate / 100
         variable_ratio = variable_cost_pct / 100
-        initial_nwc = annual_revenue * working_capital_pct / 100
+        nwc_ratio = working_capital_pct / 100
+        years = int(project_years)
 
         if initial_investment <= 0:
             st.error("เงินลงทุนเริ่มต้นต้องมากกว่า 0")
@@ -1317,28 +1322,50 @@ def render_feasibility_study():
         if discount <= 0:
             st.error("อัตราคิดลดต้องมากกว่า 0")
             return
+        if 1 + growth <= 0 or 1 + fixed_growth <= 0:
+            st.error("อัตราการเติบโตต้องไม่ทำให้รายได้หรือค่าใช้จ่ายติดลบ")
+            return
 
+        annual_depreciation = (
+            max(0.0, initial_investment - salvage_value) / years
+            if depreciation_method.startswith("Straight-line")
+            else 0.0
+        )
+        initial_nwc = annual_revenue * nwc_ratio
+        nwc_balance = initial_nwc
         cash_flows = [-initial_investment - initial_nwc]
         rows = []
         revenue = annual_revenue
         fixed = fixed_cost
-        for year in range(1, int(project_years) + 1):
+
+        for year in range(1, years + 1):
             if year > 1:
                 revenue *= (1 + growth)
                 fixed *= (1 + fixed_growth)
+
             variable_cost = revenue * variable_ratio
             ebitda = revenue - variable_cost - fixed
-            tax_expense = max(0.0, ebitda * tax)
-            operating_cash_flow = ebitda - tax_expense
+            depreciation = annual_depreciation
+            ebit = ebitda - depreciation
+            tax_expense = max(0.0, ebit * tax)
+            nopat = ebit - tax_expense
+            operating_cash_flow = nopat + depreciation
+
             capex = annual_capex
-            nwc_change = 0.0
             if year == 1:
-                nwc_change = 0.0
-            elif year == int(project_years):
-                nwc_change = -initial_nwc
-            free_cash_flow = operating_cash_flow - capex - nwc_change
-            if year == int(project_years):
+                change_nwc = 0.0
+            elif year == years:
+                change_nwc = -nwc_balance
+                nwc_balance = 0.0
+            else:
+                required_nwc = revenue * nwc_ratio
+                change_nwc = required_nwc - nwc_balance
+                nwc_balance = required_nwc
+
+            free_cash_flow = operating_cash_flow - capex - change_nwc
+            if year == years:
                 free_cash_flow += salvage_value
+
             discount_factor = 1 / ((1 + discount) ** year)
             discounted_cf = free_cash_flow * discount_factor
             cash_flows.append(float(free_cash_flow))
@@ -1347,11 +1374,15 @@ def render_feasibility_study():
                 "Revenue": revenue,
                 "Variable Costs": variable_cost,
                 "Fixed Costs": fixed,
-                "EBITDA (proxy)": ebitda,
+                "EBITDA": ebitda,
+                "Depreciation": depreciation,
+                "EBIT": ebit,
                 "Cash Tax": tax_expense,
+                "NOPAT": nopat,
+                "Add Back Depreciation": depreciation,
                 "Additional CapEx": capex,
-                "Change in NWC": nwc_change,
-                "Salvage Value": salvage_value if year == int(project_years) else 0.0,
+                "Change in NWC": change_nwc,
+                "Salvage Value": salvage_value if year == years else 0.0,
                 "Free Cash Flow": free_cash_flow,
                 "Discount Factor": discount_factor,
                 "Present Value": discounted_cf
@@ -1367,9 +1398,9 @@ def render_feasibility_study():
         except Exception:
             irr_value = None
 
-        cumulative = -initial_investment - initial_nwc
+        cumulative = cash_flows[0]
         payback = None
-        discounted_cumulative = -initial_investment - initial_nwc
+        discounted_cumulative = cash_flows[0]
         discounted_payback = None
         for idx, cf in enumerate(cash_flows[1:], start=1):
             previous_cumulative = cumulative
@@ -1377,13 +1408,20 @@ def render_feasibility_study():
             if payback is None and cumulative >= 0 and cf > 0:
                 payback = (idx - 1) + abs(previous_cumulative) / cf
             previous_discounted = discounted_cumulative
-            discounted_cumulative += cf / ((1 + discount) ** idx)
             discounted_cf = cf / ((1 + discount) ** idx)
+            discounted_cumulative += discounted_cf
             if discounted_payback is None and discounted_cumulative >= 0 and discounted_cf > 0:
                 discounted_payback = (idx - 1) + abs(previous_discounted) / discounted_cf
 
-        profitability_index = (npv + initial_investment + initial_nwc) / (initial_investment + initial_nwc)
-        break_even_revenue = fixed_cost / (1 - variable_ratio) if variable_ratio < 1 else np.nan
+        total_initial_funding = initial_investment + initial_nwc
+        profitability_index = (
+            (npv + total_initial_funding) / total_initial_funding
+            if total_initial_funding > 0 else np.nan
+        )
+        break_even_revenue = (
+            fixed_cost / (1 - variable_ratio)
+            if variable_ratio < 1 else np.nan
+        )
 
         st.divider()
         st.subheader(f"2. ผลการประเมินโครงการ: {project_name}")
@@ -1400,24 +1438,25 @@ def render_feasibility_study():
         else:
             st.info("ผลประเมินยังไม่ชัดเจน ควรพิจารณาตัวชี้วัดร่วมกับความเสี่ยงและข้อมูลเชิงธุรกิจ")
 
-        st.caption("หมายเหตุ: EBITDA เป็นตัวแทนกำไรจากการดำเนินงานก่อนค่าเสื่อมราคาและดอกเบี้ยในแบบจำลองนี้ และใช้เป็นฐานคำนวณภาษีอย่างง่าย ยังไม่รวมค่าเสื่อมราคาและผลประโยชน์ทางภาษีจากค่าเสื่อมราคา")
+        st.caption("แบบจำลองคำนวณภาษีจาก EBIT หลังหักค่าเสื่อมราคา และบวกค่าเสื่อมราคากลับในกระแสเงินสดจากการดำเนินงาน จึงสะท้อน Depreciation Tax Shield เมื่อมีกำไรทางภาษี")
+        st.caption("ข้อจำกัด: ใช้ค่าเสื่อมราคาเส้นตรงกับเงินลงทุนสินทรัพย์เริ่มต้นตลอดอายุโครงการ ไม่คิดภาษีจากกำไร/ขาดทุนในการจำหน่ายสินทรัพย์ และไม่คิดค่าเสื่อมของ CapEx เพิ่มเติมโดยอัตโนมัติ ควรปรับให้ตรงกับนโยบายบัญชีและภาษีจริง")
         st.divider()
         st.subheader("3. Projected Cash Flow")
         st.dataframe(forecast_df.style.format({c: "{:,.2f}" for c in forecast_df.columns if c != "Year"}), use_container_width=True, hide_index=True)
-        chart_df = forecast_df.set_index("Year")[["Revenue", "Free Cash Flow", "Present Value"]]
-        st.line_chart(chart_df, use_container_width=True)
+        st.line_chart(forecast_df.set_index("Year")[["Revenue", "EBITDA", "Free Cash Flow", "Present Value"]], use_container_width=True)
         st.download_button("📥 Download Feasibility Cash Flow", forecast_df.to_csv(index=False).encode("utf-8-sig"), "Feasibility_Cash_Flow.csv", "text/csv")
 
         st.divider()
         st.subheader("4. Investment Decision Metrics")
         metrics_df = pd.DataFrame({
-            "ตัวชี้วัด": ["Initial Investment incl. NWC", "NPV", "IRR", "Required Return", "Profitability Index", "Break-even Revenue (Year 1)", "Payback Period", "Discounted Payback Period"],
+            "ตัวชี้วัด": ["Initial Investment incl. NWC", "Annual Depreciation", "NPV", "IRR", "Required Return", "Profitability Index", "Break-even Revenue (Year 1)", "Payback Period", "Discounted Payback Period"],
             "ผลการคำนวณ": [
-                f"{initial_investment + initial_nwc:,.2f} บาท",
+                f"{total_initial_funding:,.2f} บาท",
+                f"{annual_depreciation:,.2f} บาท/ปี",
                 f"{npv:,.2f} บาท",
                 f"{irr_value * 100:.2f}%" if irr_value is not None else "คำนวณไม่ได้",
                 f"{discount_rate:.2f}%",
-                f"{profitability_index:.3f}",
+                f"{profitability_index:.3f}" if np.isfinite(profitability_index) else "คำนวณไม่ได้",
                 f"{break_even_revenue:,.2f} บาท" if np.isfinite(break_even_revenue) else "คำนวณไม่ได้",
                 f"{payback:.2f} ปี" if payback is not None else "เกินอายุโครงการ",
                 f"{discounted_payback:.2f} ปี" if discounted_payback is not None else "เกินอายุโครงการ"
@@ -1437,15 +1476,27 @@ def render_feasibility_study():
                 scenario_revenue = annual_revenue
                 scenario_fixed = fixed_cost
                 scenario_cfs = [-initial_investment - initial_nwc]
-                for year in range(1, int(project_years) + 1):
+                scenario_nwc_balance = initial_nwc
+                for year in range(1, years + 1):
                     if year > 1:
                         scenario_revenue *= (1 + scenario_growth)
                         scenario_fixed *= (1 + fixed_growth)
                     scenario_ebitda = scenario_revenue * (1 - variable_ratio) - scenario_fixed
-                    scenario_tax = max(0.0, scenario_ebitda * tax)
-                    scenario_cf = scenario_ebitda - scenario_tax - annual_capex
-                    if year == int(project_years):
-                        scenario_cf += salvage_value + initial_nwc
+                    scenario_ebit = scenario_ebitda - annual_depreciation
+                    scenario_tax = max(0.0, scenario_ebit * tax)
+                    scenario_ocf = scenario_ebit - scenario_tax + annual_depreciation
+                    if year == 1:
+                        scenario_nwc_change = 0.0
+                    elif year == years:
+                        scenario_nwc_change = -scenario_nwc_balance
+                        scenario_nwc_balance = 0.0
+                    else:
+                        target_nwc = scenario_revenue * nwc_ratio
+                        scenario_nwc_change = target_nwc - scenario_nwc_balance
+                        scenario_nwc_balance = target_nwc
+                    scenario_cf = scenario_ocf - annual_capex - scenario_nwc_change
+                    if year == years:
+                        scenario_cf += salvage_value
                     scenario_cfs.append(scenario_cf)
                 scenario_npv = sum(cf / ((1 + scenario_discount) ** year) for year, cf in enumerate(scenario_cfs))
                 row[f"{scenario_growth * 100:.1f}%"] = scenario_npv
