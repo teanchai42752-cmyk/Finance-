@@ -393,32 +393,162 @@ def calculate_sensitivity(
 def render_trading_signals():
 
     st.title("📈 Trading Signals")
+    st.write("วิเคราะห์แนวโน้มราคาและสัญญาณทางเทคนิคสำหรับหุ้นและสินทรัพย์หลัก")
+    st.caption("ข้อมูลราคาอ้างอิงจาก Yahoo Finance ผ่าน yfinance อาจล่าช้าและไม่ใช่ราคาสำหรับส่งคำสั่งซื้อขายจริง")
 
-    st.write(
-        "ระบบวิเคราะห์สัญญาณการซื้อขาย "
-        "เพื่อช่วยประเมินแนวโน้มราคาและจังหวะเข้าเทรด"
-    )
+    symbol_map = {
+        "AAPL": "AAPL",
+        "TSLA": "TSLA",
+        "XAU/USD": "XAUUSD=X",
+        "EUR/USD": "EURUSD=X"
+    }
 
-    st.divider()
+    c1, c2, c3 = st.columns([1.2, 1, 1])
+    with c1:
+        asset = st.selectbox("เลือกสินทรัพย์", list(symbol_map.keys()), key="signals_asset")
+    with c2:
+        period = st.selectbox("ช่วงข้อมูล", ["3mo", "6mo", "1y", "2y"], index=2, key="signals_period")
+    with c3:
+        interval = st.selectbox("Timeframe", ["1d", "1h", "30m"], index=0, key="signals_interval")
 
-    st.subheader("Trading Dashboard")
+    if interval != "1d" and period == "2y":
+        period = "6mo"
+        st.info("ปรับช่วงข้อมูลเป็น 6mo เนื่องจากข้อมูล Intraday มีข้อจำกัด")
 
-    col1, col2, col3 = st.columns(3)
+    if st.button("🔄 โหลดข้อมูลล่าสุด", type="primary", key="refresh_signals"):
+        st.cache_data.clear()
 
-    col1.metric("Asset", "XAU/USD")
-    col2.metric("Signal", "Waiting")
-    col3.metric("Market Status", "Monitoring")
+    @st.cache_data(ttl=60, show_spinner=False)
+    def load_market_data(ticker, selected_period, selected_interval):
+        import yfinance as yf
+        data = yf.download(
+            ticker,
+            period=selected_period,
+            interval=selected_interval,
+            auto_adjust=True,
+            progress=False,
+            threads=False
+        )
+        if data is None or data.empty:
+            return pd.DataFrame()
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        data = data.rename(columns=str.title)
+        return data
 
-    st.info(
-        "พื้นที่สำหรับพัฒนาระบบ Trading Signals"
-    )
+    try:
+        with st.spinner(f"กำลังดึงข้อมูล {asset}..."):
+            market = load_market_data(symbol_map[asset], period, interval)
 
-    st.subheader("Technical Analysis")
+        if market.empty or "Close" not in market.columns:
+            st.error("ไม่พบข้อมูลราคา กรุณาลองเปลี่ยนช่วงเวลาหรือกลับมาตรวจสอบอีกครั้ง")
+            return
 
-    st.write("- Price Chart")
-    st.write("- Technical Indicators")
-    st.write("- Buy / Sell Signals")
-    st.write("- Entry Price / Stop Loss / Take Profit")
+        market = market.copy()
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in market.columns:
+                market[col] = pd.to_numeric(market[col], errors="coerce")
+        market = market.dropna(subset=["Close"])
+        if len(market) < 20:
+            st.warning("ข้อมูลมีน้อยเกินไปสำหรับการคำนวณตัวชี้วัด กรุณาเลือกช่วงเวลาที่ยาวขึ้น")
+            return
+
+        close = market["Close"]
+        market["SMA 5"] = close.rolling(5).mean()
+        market["SMA 15"] = close.rolling(15).mean()
+        market["EMA 12"] = close.ewm(span=12, adjust=False).mean()
+        market["EMA 26"] = close.ewm(span=26, adjust=False).mean()
+        market["MACD"] = market["EMA 12"] - market["EMA 26"]
+        market["MACD Signal"] = market["MACD"].ewm(span=9, adjust=False).mean()
+
+        delta = close.diff()
+        gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+        loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+        rs = gain / loss.replace(0, np.nan)
+        market["RSI 14"] = 100 - (100 / (1 + rs))
+        market["RSI 14"] = market["RSI 14"].fillna(50)
+
+        market["TR"] = pd.concat([
+            market["High"] - market["Low"],
+            (market["High"] - close.shift()).abs(),
+            (market["Low"] - close.shift()).abs()
+        ], axis=1).max(axis=1) if {"High", "Low"}.issubset(market.columns) else close.diff().abs()
+        market["ATR 14"] = market["TR"].rolling(14).mean()
+
+        latest = market.iloc[-1]
+        previous = market.iloc[-2]
+        price = float(latest["Close"])
+        prior_price = float(previous["Close"])
+        change = price - prior_price
+        change_pct = (change / prior_price * 100) if prior_price else 0.0
+        sma_fast = float(latest["SMA 5"])
+        sma_slow = float(latest["SMA 15"])
+        rsi = float(latest["RSI 14"])
+        macd = float(latest["MACD"])
+        macd_signal = float(latest["MACD Signal"])
+
+        if sma_fast > sma_slow and macd > macd_signal and rsi < 70:
+            signal = "BUY"
+            rationale = "SMA 5 อยู่เหนือ SMA 15 และ MACD เป็นบวกเมื่อเทียบกับเส้น Signal โดย RSI ยังไม่เข้าสู่เขตซื้อมากเกินไป"
+        elif sma_fast < sma_slow and macd < macd_signal and rsi > 30:
+            signal = "SELL"
+            rationale = "SMA 5 อยู่ต่ำกว่า SMA 15 และ MACD ต่ำกว่าเส้น Signal โดย RSI ยังไม่เข้าสู่เขตขายมากเกินไป"
+        else:
+            signal = "HOLD"
+            rationale = "สัญญาณจากแนวโน้มและโมเมนตัมยังไม่สอดคล้องกันเพียงพอ"
+
+        atr = float(latest["ATR 14"]) if pd.notna(latest["ATR 14"]) else price * 0.01
+        if signal == "BUY":
+            stop_loss = price - 1.5 * atr
+            take_profit = price + 3.0 * atr
+        elif signal == "SELL":
+            stop_loss = price + 1.5 * atr
+            take_profit = price - 3.0 * atr
+        else:
+            stop_loss = np.nan
+            take_profit = np.nan
+
+        st.divider()
+        st.subheader(f"Market Overview — {asset}")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Last Price", f"{price:,.5f}" if "FX" in symbol_map[asset] else f"{price:,.2f}")
+        m2.metric("Change", f"{change:+,.5f}", f"{change_pct:+.2f}%")
+        m3.metric("Trading Signal", signal)
+        m4.metric("RSI (14)", f"{rsi:.2f}")
+
+        signal_color = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}[signal]
+        st.markdown(f"### {signal_color} {signal}")
+        st.write(rationale)
+
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Entry Reference", f"{price:,.5f}")
+        s2.metric("Stop Loss", f"{stop_loss:,.5f}" if pd.notna(stop_loss) else "รอสัญญาณ")
+        s3.metric("Take Profit (RR 1:2)", f"{take_profit:,.5f}" if pd.notna(take_profit) else "รอสัญญาณ")
+
+        st.caption("ระดับ Stop Loss / Take Profit เป็นตัวอย่างจาก ATR 1.5 เท่า และ Risk:Reward 1:2 ไม่ใช่คำแนะนำลงทุนหรือคำสั่งซื้อขาย")
+        st.divider()
+        st.subheader("Price & Moving Averages")
+        chart_columns = ["Close", "SMA 5", "SMA 15"]
+        st.line_chart(market[chart_columns].tail(150), use_container_width=True)
+
+        left, right = st.columns(2)
+        with left:
+            st.subheader("MACD")
+            st.line_chart(market[["MACD", "MACD Signal"]].tail(150), use_container_width=True)
+        with right:
+            st.subheader("RSI (14)")
+            st.line_chart(market[["RSI 14"]].tail(150), use_container_width=True)
+
+        st.subheader("Technical Indicators")
+        indicator_view = market[["Close", "SMA 5", "SMA 15", "RSI 14", "MACD", "MACD Signal", "ATR 14"]].tail(10).sort_index(ascending=False)
+        st.dataframe(indicator_view.style.format("{:,.4f}"), use_container_width=True)
+
+        csv_data = market.reset_index().to_csv(index=False).encode("utf-8-sig")
+        st.download_button("📥 Download Market Data & Indicators", csv_data, f"{asset.replace('/', '_')}_signals.csv", "text/csv")
+        st.caption(f"แหล่งข้อมูล: Yahoo Finance | Ticker: {symbol_map[asset]} | อัปเดตตามข้อมูลล่าสุดที่ผู้ให้บริการเปิดเผย")
+    except Exception as e:
+        st.error(f"ไม่สามารถประมวลผล Trading Signals ได้: {e}")
+        st.info("ตรวจสอบการเชื่อมต่ออินเทอร์เน็ตและลองโหลดข้อมูลใหม่")
 
 
 # =====================================================
@@ -1137,38 +1267,201 @@ def render_dcf_valuation():
 def render_feasibility_study():
 
     st.title("📊 Feasibility Study")
-
-    st.write(
-        "ระบบวิเคราะห์ความเป็นไปได้ของโครงการลงทุน "
-        "เพื่อประเมินผลตอบแทน ต้นทุน และความคุ้มค่าทางการเงิน"
-    )
-
+    st.write("ประเมินความเป็นไปได้ทางการเงินของโครงการลงทุนด้วยประมาณการกระแสเงินสดและตัวชี้วัดความคุ้มค่า")
+    st.caption("ผลลัพธ์เป็นแบบจำลองจากสมมติฐานที่ผู้ใช้ป้อน ควรตรวจสอบความสมเหตุสมผลของข้อมูลก่อนตัดสินใจลงทุน")
     st.divider()
 
-    st.subheader(
-        "Project Analysis Dashboard"
-    )
+    st.subheader("1. Project Assumptions")
+    with st.form("feasibility_inputs"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            project_name = st.text_input("ชื่อโครงการ", value="New Investment Project")
+            initial_investment = st.number_input("เงินลงทุนเริ่มต้น (บาท)", min_value=0.0, value=5_000_000.0, step=100_000.0)
+            project_years = st.number_input("ระยะเวลาโครงการ (ปี)", min_value=1, max_value=20, value=5, step=1)
+        with c2:
+            annual_revenue = st.number_input("รายได้ปีแรก (บาท)", min_value=0.0, value=2_500_000.0, step=100_000.0)
+            revenue_growth = st.number_input("อัตราการเติบโตของรายได้ต่อปี (%)", min_value=-50.0, max_value=200.0, value=5.0, step=1.0)
+            variable_cost_pct = st.number_input("ต้นทุนผันแปรต่อรายได้ (%)", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
+        with c3:
+            fixed_cost = st.number_input("ค่าใช้จ่ายคงที่ปีแรก (บาท)", min_value=0.0, value=900_000.0, step=50_000.0)
+            fixed_cost_growth = st.number_input("การเติบโตของค่าใช้จ่ายคงที่ (%)", min_value=-50.0, max_value=100.0, value=3.0, step=1.0)
+            discount_rate = st.number_input("อัตราคิดลด / Required Return (%)", min_value=0.1, max_value=100.0, value=10.0, step=0.5)
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            tax_rate = st.number_input("อัตราภาษี (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0)
+        with c5:
+            annual_capex = st.number_input("เงินลงทุนเพิ่มเติมต่อปี (บาท)", min_value=0.0, value=0.0, step=50_000.0)
+        with c6:
+            salvage_value = st.number_input("มูลค่าซากเมื่อสิ้นสุดโครงการ (บาท)", min_value=0.0, value=0.0, step=50_000.0)
+        working_capital_pct = st.number_input("เงินทุนหมุนเวียนเริ่มต้น (% ของรายได้ปีแรก)", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+        submitted = st.form_submit_button("🚀 ประเมินความคุ้มค่าของโครงการ", type="primary", use_container_width=True)
 
-    col1, col2, col3 = st.columns(3)
+    if not submitted:
+        st.info("กรอกสมมติฐานของโครงการ แล้วกดปุ่มประเมินเพื่อคำนวณ NPV, IRR และระยะเวลาคืนทุน")
+        return
 
-    col1.metric("NPV", "N/A")
-    col2.metric("IRR", "N/A")
-    col3.metric("Payback Period", "N/A")
+    try:
+        growth = revenue_growth / 100
+        fixed_growth = fixed_cost_growth / 100
+        tax = tax_rate / 100
+        discount = discount_rate / 100
+        variable_ratio = variable_cost_pct / 100
+        initial_nwc = annual_revenue * working_capital_pct / 100
 
-    st.info(
-        "พื้นที่สำหรับพัฒนาระบบ Feasibility Study"
-    )
+        if initial_investment <= 0:
+            st.error("เงินลงทุนเริ่มต้นต้องมากกว่า 0")
+            return
+        if discount <= 0:
+            st.error("อัตราคิดลดต้องมากกว่า 0")
+            return
 
-    st.subheader(
-        "Project Financial Analysis"
-    )
+        cash_flows = [-initial_investment - initial_nwc]
+        rows = []
+        revenue = annual_revenue
+        fixed = fixed_cost
+        for year in range(1, int(project_years) + 1):
+            if year > 1:
+                revenue *= (1 + growth)
+                fixed *= (1 + fixed_growth)
+            variable_cost = revenue * variable_ratio
+            ebitda = revenue - variable_cost - fixed
+            tax_expense = max(0.0, ebitda * tax)
+            operating_cash_flow = ebitda - tax_expense
+            capex = annual_capex
+            nwc_change = 0.0
+            if year == 1:
+                nwc_change = 0.0
+            elif year == int(project_years):
+                nwc_change = -initial_nwc
+            free_cash_flow = operating_cash_flow - capex - nwc_change
+            if year == int(project_years):
+                free_cash_flow += salvage_value
+            discount_factor = 1 / ((1 + discount) ** year)
+            discounted_cf = free_cash_flow * discount_factor
+            cash_flows.append(float(free_cash_flow))
+            rows.append({
+                "Year": year,
+                "Revenue": revenue,
+                "Variable Costs": variable_cost,
+                "Fixed Costs": fixed,
+                "EBITDA (proxy)": ebitda,
+                "Cash Tax": tax_expense,
+                "Additional CapEx": capex,
+                "Change in NWC": nwc_change,
+                "Salvage Value": salvage_value if year == int(project_years) else 0.0,
+                "Free Cash Flow": free_cash_flow,
+                "Discount Factor": discount_factor,
+                "Present Value": discounted_cf
+            })
 
-    st.write("- Initial Investment")
-    st.write("- Revenue Projection")
-    st.write("- Operating Costs")
-    st.write("- Net Present Value (NPV)")
-    st.write("- Internal Rate of Return (IRR)")
-    st.write("- Payback Period")
+        forecast_df = pd.DataFrame(rows)
+        npv = float(sum(cf / ((1 + discount) ** year) for year, cf in enumerate(cash_flows)))
+        try:
+            import numpy_financial as npf
+            irr_value = float(npf.irr(cash_flows))
+            if not np.isfinite(irr_value):
+                irr_value = None
+        except Exception:
+            irr_value = None
+
+        cumulative = -initial_investment - initial_nwc
+        payback = None
+        discounted_cumulative = -initial_investment - initial_nwc
+        discounted_payback = None
+        for idx, cf in enumerate(cash_flows[1:], start=1):
+            previous_cumulative = cumulative
+            cumulative += cf
+            if payback is None and cumulative >= 0 and cf > 0:
+                payback = (idx - 1) + abs(previous_cumulative) / cf
+            previous_discounted = discounted_cumulative
+            discounted_cumulative += cf / ((1 + discount) ** idx)
+            discounted_cf = cf / ((1 + discount) ** idx)
+            if discounted_payback is None and discounted_cumulative >= 0 and discounted_cf > 0:
+                discounted_payback = (idx - 1) + abs(previous_discounted) / discounted_cf
+
+        profitability_index = (npv + initial_investment + initial_nwc) / (initial_investment + initial_nwc)
+        break_even_revenue = fixed_cost / (1 - variable_ratio) if variable_ratio < 1 else np.nan
+
+        st.divider()
+        st.subheader(f"2. ผลการประเมินโครงการ: {project_name}")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Net Present Value (NPV)", f"฿{npv:,.0f}", "คุ้มค่า" if npv > 0 else "ไม่ผ่านเกณฑ์" if npv < 0 else "จุดคุ้มทุน")
+        k2.metric("Internal Rate of Return (IRR)", f"{irr_value * 100:.2f}%" if irr_value is not None else "คำนวณไม่ได้")
+        k3.metric("Payback Period", f"{payback:.2f} ปี" if payback is not None else "เกินอายุโครงการ")
+        k4.metric("Discounted Payback", f"{discounted_payback:.2f} ปี" if discounted_payback is not None else "เกินอายุโครงการ")
+
+        if npv > 0 and irr_value is not None and irr_value > discount:
+            st.success("ผลเบื้องต้น: โครงการผ่านเกณฑ์ทางการเงินภายใต้สมมติฐานที่กำหนด")
+        elif npv < 0 or (irr_value is not None and irr_value < discount):
+            st.warning("ผลเบื้องต้น: โครงการยังไม่ผ่านเกณฑ์ผลตอบแทนทางการเงิน ควรทบทวนรายได้ ต้นทุน หรือเงินลงทุน")
+        else:
+            st.info("ผลประเมินยังไม่ชัดเจน ควรพิจารณาตัวชี้วัดร่วมกับความเสี่ยงและข้อมูลเชิงธุรกิจ")
+
+        st.caption("หมายเหตุ: EBITDA เป็นตัวแทนกำไรจากการดำเนินงานก่อนค่าเสื่อมราคาและดอกเบี้ยในแบบจำลองนี้ และใช้เป็นฐานคำนวณภาษีอย่างง่าย ยังไม่รวมค่าเสื่อมราคาและผลประโยชน์ทางภาษีจากค่าเสื่อมราคา")
+        st.divider()
+        st.subheader("3. Projected Cash Flow")
+        st.dataframe(forecast_df.style.format({c: "{:,.2f}" for c in forecast_df.columns if c != "Year"}), use_container_width=True, hide_index=True)
+        chart_df = forecast_df.set_index("Year")[["Revenue", "Free Cash Flow", "Present Value"]]
+        st.line_chart(chart_df, use_container_width=True)
+        st.download_button("📥 Download Feasibility Cash Flow", forecast_df.to_csv(index=False).encode("utf-8-sig"), "Feasibility_Cash_Flow.csv", "text/csv")
+
+        st.divider()
+        st.subheader("4. Investment Decision Metrics")
+        metrics_df = pd.DataFrame({
+            "ตัวชี้วัด": ["Initial Investment incl. NWC", "NPV", "IRR", "Required Return", "Profitability Index", "Break-even Revenue (Year 1)", "Payback Period", "Discounted Payback Period"],
+            "ผลการคำนวณ": [
+                f"{initial_investment + initial_nwc:,.2f} บาท",
+                f"{npv:,.2f} บาท",
+                f"{irr_value * 100:.2f}%" if irr_value is not None else "คำนวณไม่ได้",
+                f"{discount_rate:.2f}%",
+                f"{profitability_index:.3f}",
+                f"{break_even_revenue:,.2f} บาท" if np.isfinite(break_even_revenue) else "คำนวณไม่ได้",
+                f"{payback:.2f} ปี" if payback is not None else "เกินอายุโครงการ",
+                f"{discounted_payback:.2f} ปี" if discounted_payback is not None else "เกินอายุโครงการ"
+            ]
+        })
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("5. NPV Sensitivity Analysis")
+        st.write("วิเคราะห์ NPV เมื่ออัตราคิดลดและการเติบโตของรายได้เปลี่ยนแปลงจากสมมติฐานฐาน")
+        discount_scenarios = [max(0.001, discount - 0.02), max(0.001, discount - 0.01), discount, discount + 0.01, discount + 0.02]
+        growth_scenarios = [growth - 0.02, growth - 0.01, growth, growth + 0.01, growth + 0.02]
+        sensitivity_rows = []
+        for scenario_discount in discount_scenarios:
+            row = {"Discount Rate (%)": scenario_discount * 100}
+            for scenario_growth in growth_scenarios:
+                scenario_revenue = annual_revenue
+                scenario_fixed = fixed_cost
+                scenario_cfs = [-initial_investment - initial_nwc]
+                for year in range(1, int(project_years) + 1):
+                    if year > 1:
+                        scenario_revenue *= (1 + scenario_growth)
+                        scenario_fixed *= (1 + fixed_growth)
+                    scenario_ebitda = scenario_revenue * (1 - variable_ratio) - scenario_fixed
+                    scenario_tax = max(0.0, scenario_ebitda * tax)
+                    scenario_cf = scenario_ebitda - scenario_tax - annual_capex
+                    if year == int(project_years):
+                        scenario_cf += salvage_value + initial_nwc
+                    scenario_cfs.append(scenario_cf)
+                scenario_npv = sum(cf / ((1 + scenario_discount) ** year) for year, cf in enumerate(scenario_cfs))
+                row[f"{scenario_growth * 100:.1f}%"] = scenario_npv
+            sensitivity_rows.append(row)
+        sensitivity_df = pd.DataFrame(sensitivity_rows)
+        st.dataframe(sensitivity_df.style.format("{:,.0f}"), use_container_width=True, hide_index=True)
+        st.download_button("📥 Download NPV Sensitivity", sensitivity_df.to_csv(index=False).encode("utf-8-sig"), "Feasibility_Sensitivity.csv", "text/csv")
+
+        st.divider()
+        st.subheader("6. Decision Guidelines")
+        st.markdown("""
+        - **NPV > 0:** มูลค่าปัจจุบันของผลประโยชน์สูงกว่าเงินลงทุนและต้นทุนเงินทุน
+        - **IRR > Required Return:** อัตราผลตอบแทนภายในสูงกว่าอัตราผลตอบแทนขั้นต่ำที่ต้องการ
+        - **Payback Period:** ระยะเวลาที่กระแสเงินสดสะสมแบบไม่คิดลดคืนเงินลงทุน
+        - **Discounted Payback:** ระยะเวลาคืนทุนเมื่อคิดมูลค่าเงินตามเวลา
+        - **Profitability Index > 1:** มูลค่าปัจจุบันของกระแสเงินสดรับต่อเงินลงทุนเริ่มต้นมากกว่า 1
+        """)
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการประเมินโครงการ: {e}")
 
 
 # =====================================================
