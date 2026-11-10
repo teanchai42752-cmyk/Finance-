@@ -469,6 +469,13 @@ def render_trading_signals():
     else:
         st.caption("ข้อมูลราคาอ้างอิงจาก Yahoo Finance ผ่าน yfinance อาจล่าช้าและไม่ใช่ราคาสำหรับส่งคำสั่งซื้อขายจริง")
         symbol_map = {"AAPL": "AAPL", "TSLA": "TSLA", "XAU/USD": "XAUUSD=X", "EUR/USD": "EURUSD=X"}
+        # Yahoo intraday data has shorter history limits than daily data.
+        if interval == "1h" and period in ["1y", "2y"]:
+            period = "6mo"
+            st.info("ปรับช่วงข้อมูลเป็น 6mo สำหรับกราฟรายชั่วโมง เพื่อให้เหมาะกับข้อจำกัดข้อมูลย้อนหลังของ Yahoo Finance")
+        elif interval == "30m" and period != "3mo":
+            period = "1mo"
+            st.info("ปรับช่วงข้อมูลเป็น 1mo สำหรับกราฟ 30 นาที เพื่อให้เหมาะกับข้อจำกัดข้อมูลย้อนหลังของ Yahoo Finance")
         c1, c2, c3 = st.columns([1.2, 1, 1])
         with c1:
             asset = st.selectbox("เลือกสินทรัพย์", list(symbol_map.keys()), key="signals_asset")
@@ -489,6 +496,9 @@ def render_trading_signals():
         def load_yahoo_market_data(ticker, selected_period, selected_interval):
             import yfinance as yf
             data = yf.download(ticker, period=selected_period, interval=selected_interval, auto_adjust=True, progress=False, threads=False)
+            # If Yahoo's XAU/USD spot symbol is unavailable, try the gold futures ticker.
+            if (data is None or data.empty) and ticker == "XAUUSD=X":
+                data = yf.download("GC=F", period=selected_period, interval=selected_interval, auto_adjust=True, progress=False, threads=False)
             if data is None or data.empty:
                 return pd.DataFrame()
             if isinstance(data.columns, pd.MultiIndex):
