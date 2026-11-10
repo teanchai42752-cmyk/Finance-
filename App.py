@@ -1352,11 +1352,11 @@ def render_feasibility_study():
             operating_cash_flow = nopat + depreciation
 
             capex = annual_capex
-            if year == 1:
-                change_nwc = 0.0
-            elif year == years:
+            if year == years:
                 change_nwc = -nwc_balance
                 nwc_balance = 0.0
+            elif year == 1:
+                change_nwc = 0.0
             else:
                 required_nwc = revenue * nwc_ratio
                 change_nwc = required_nwc - nwc_balance
@@ -1485,11 +1485,11 @@ def render_feasibility_study():
                     scenario_ebit = scenario_ebitda - annual_depreciation
                     scenario_tax = max(0.0, scenario_ebit * tax)
                     scenario_ocf = scenario_ebit - scenario_tax + annual_depreciation
-                    if year == 1:
-                        scenario_nwc_change = 0.0
-                    elif year == years:
+                    if year == years:
                         scenario_nwc_change = -scenario_nwc_balance
                         scenario_nwc_balance = 0.0
+                    elif year == 1:
+                        scenario_nwc_change = 0.0
                     else:
                         target_nwc = scenario_revenue * nwc_ratio
                         scenario_nwc_change = target_nwc - scenario_nwc_balance
