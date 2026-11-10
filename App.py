@@ -411,9 +411,12 @@ def render_trading_signals():
     with c3:
         interval = st.selectbox("Timeframe", ["1d", "1h", "30m"], index=0, key="signals_interval")
 
-    if interval != "1d" and period == "2y":
+    if interval == "30m" and period != "1mo":
+        period = "1mo"
+        st.info("ปรับช่วงข้อมูลเป็น 1mo เนื่องจากข้อมูล 30 นาทีมีข้อจำกัดด้านระยะเวลาย้อนหลัง")
+    elif interval == "1h" and period == "2y":
         period = "6mo"
-        st.info("ปรับช่วงข้อมูลเป็น 6mo เนื่องจากข้อมูล Intraday มีข้อจำกัด")
+        st.info("ปรับช่วงข้อมูลเป็น 6mo เนื่องจากข้อมูลรายชั่วโมงมีข้อจำกัดด้านระยะเวลาย้อนหลัง")
 
     if st.button("🔄 โหลดข้อมูลล่าสุด", type="primary", key="refresh_signals"):
         st.cache_data.clear()
